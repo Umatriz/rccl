@@ -41,14 +41,9 @@ impl Lexer {
                 ']' => t.push(RihgtBracket),
                 '{' => t.push(LeftBrace),
                 '}' => t.push(RightBrace),
-                c if c.is_ascii_digit() => {
-                    let mut s = String::from(c);
-                    while let Some(c) = chars.next_if(|c| c.is_ascii_digit()) {
-                        s.push(c);
-                    }
-                    let num = s.parse::<i16>().expect("Failed to parse number");
-                    t.push(Number(num))
-                }
+
+                '/' => while let Some(_) = chars.next_if(|c| *c != '\n' || *c != '\r') {},
+
                 c if c.is_ascii_alphabetic() => {
                     t.push(Ident(c));
                 }
@@ -116,7 +111,6 @@ pub enum Token {
     RightBrace,
 
     Ident(char),
-    Number(i16),
 
     Eof,
 }
