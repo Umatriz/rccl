@@ -1,7 +1,8 @@
 use std::io::Write;
+use std::ops::Range;
 use std::{collections::HashMap, io::Read};
 
-use crate::lexer::{Lexer, Token};
+use crate::lexer::{Lexer, Token, TokensIter};
 
 #[derive(Debug, Default)]
 pub struct Stack(Vec<i16>);
@@ -26,17 +27,14 @@ pub struct Variables(HashMap<char, i16>);
 #[derive(Debug, Default)]
 pub struct Procedures(HashMap<char, Procedure>);
 
+#[derive(Clone)]
 pub struct Procedure {
-    locals: Variables,
-    body: Box<dyn Fn(&mut Stack, &mut Variables)>,
+    body_span: Range<usize>,
 }
 
 impl std::fmt::Debug for Procedure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Procedure")
-            .field("locals", &self.locals)
-            .field("body", &"{...}")
-            .finish()
+        f.debug_struct("Procedure").field("body", &"{...}").finish()
     }
 }
 
@@ -68,29 +66,54 @@ impl<I, O> InterpretationData<I, O> {
             .and_then(|locals| locals.0.get_mut(&name))
             .or_else(|| self.globals.0.get_mut(&name))
     }
+
+    pub fn set_locals(&mut self, locals: Variables) {
+        self.locals = Some(locals);
+    }
+
+    pub fn clear_locals(&mut self) {
+        self.locals = None
+    }
+}
+
+/// What was the reason to end interpretation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Output {
+    /// `End` (`#`) token was met.
+    End,
+    /// Continue `:` token was met.
+    Continue,
+    /// `Eof` was met.
+    Eof,
 }
 
 pub enum Error {
     StackIsEmpty,
     UnexpectedToken { got: Token, expected: &'static str },
     VariableDoesNotExists(char),
+    ProcedureDoesNotExists(char),
     NegativeNumberFound,
     MustBeProcedure,
     InvalidAsciiCode,
     FailedToWrite,
     FailedToRead,
     NonAsciiCharacter(char),
+    UnclosedInfiniteBlock,
 }
 
-pub fn interpret<I, O>(lexer: &mut Lexer, data: &mut InterpretationData<I, O>) -> Result<(), Error>
+pub fn interpret<I, O>(
+    tokens: &mut TokensIter,
+    data: &mut InterpretationData<I, O>,
+) -> Result<Output, Error>
 where
     I: Read,
     O: Write,
 {
+    use self::Output as Out;
     use Token::*;
 
-    loop {
-        match lexer.next_token() {
+    let out = loop {
+        match tokens.next().unwrap_or(Token::Eof) {
             Hole => todo!(),
             PushZero => {
                 data.stack.push(0);
@@ -123,7 +146,7 @@ where
 
                 *next -= top;
             }
-            Reverse => match lexer.next_token() {
+            Reverse => match tokens.next().unwrap_or(Token::Eof) {
                 Hole => data.stack.0.reverse(),
                 Ident(c) => {
                     let Some(var) = data.get_local_or_global(c) else {
@@ -133,7 +156,7 @@ where
                     let len = data.stack.0.len();
                     let start =
                         len - usize::try_from(var).map_err(|_| Error::NegativeNumberFound)?;
-                    (&mut data.stack.0[start..len]).reverse();
+                    data.stack.0[start..len].reverse();
                 }
                 t => {
                     return Err(Error::UnexpectedToken {
@@ -142,12 +165,12 @@ where
                     });
                 }
             },
-            Assign => match lexer.next_token() {
+            Assign => match tokens.next().unwrap_or(Token::Eof) {
                 Hole => {
-                    data.stack.pop().into_empty_stack()?;
+                    data.stack.pop().into_empty_stack_err()?;
                 }
                 Ident(c) => {
-                    let val = data.stack.pop().into_empty_stack()?;
+                    let val = data.stack.pop().into_empty_stack_err()?;
                     data.globals.0.insert(c, val);
                 }
                 t => {
@@ -157,7 +180,7 @@ where
                     });
                 }
             },
-            Delete => match lexer.next_token() {
+            Delete => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     if let Some(locals) = data.locals.as_mut() {
                         if locals.0.remove(&c).is_some() {
@@ -176,7 +199,7 @@ where
                     });
                 }
             },
-            Push => match lexer.next_token() {
+            Push => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(val) = data.get_local_or_global(c) else {
                         return Err(Error::VariableDoesNotExists(c));
@@ -190,7 +213,7 @@ where
                     });
                 }
             },
-            AssignLocal => match lexer.next_token() {
+            AssignLocal => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(locals) = data.locals.as_mut() else {
                         return Err(Error::MustBeProcedure);
@@ -205,7 +228,7 @@ where
                     });
                 }
             },
-            Output => match lexer.next_token() {
+            Output => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(var) = data.get_local_or_global(c) else {
                         return Err(Error::VariableDoesNotExists(c));
@@ -221,7 +244,7 @@ where
                     });
                 }
             },
-            Input => match lexer.next_token() {
+            Input => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let mut buf = [0; 1];
                     data.inp
@@ -245,31 +268,141 @@ where
                     });
                 }
             },
-            Call => todo!(),
-            End => todo!(),
-            Continue => todo!(),
-            QuestionMark => todo!(),
-            Semi => todo!(),
-            LeftParen => todo!(),
+            Call => match tokens.next().unwrap_or(Token::Eof) {
+                Ident(c) => {
+                    let procedure = data
+                        .procedures
+                        .0
+                        .get(&c)
+                        .cloned()
+                        .into_result(Error::ProcedureDoesNotExists(c))?;
+
+                    let mut tokens = tokens.child(procedure.body_span);
+                    data.set_locals(Variables::default());
+                    interpret(&mut tokens, data)?;
+                    data.clear_locals();
+                }
+                t => {
+                    return Err(Error::UnexpectedToken {
+                        got: t,
+                        expected: "procedure name",
+                    });
+                }
+            },
+            End => break Out::End,
+            Continue => break Out::Continue,
+            QuestionMark => match tokens.next().unwrap_or(Token::Eof) {
+                Ident(c) => {
+                    let end = eat_till(tokens, Token::Semi, "expected `;`")?;
+                    let var = data
+                        .get_local_or_global(c)
+                        .into_result(Error::VariableDoesNotExists(c))?;
+                    let top = data.stack.pop().into_empty_stack_err()?;
+
+                    if var == top {
+                        continue;
+                    } else {
+                        tokens.move_cursor_to(end + 1);
+                    }
+                }
+                t => {
+                    return Err(Error::UnexpectedToken {
+                        got: t,
+                        expected: "variable name",
+                    });
+                }
+            },
+            Semi => {}
+            LeftParen => {
+                let start = tokens.cursor_position();
+                let end = eat_till(tokens, Token::RightParen, "expected `)`")?;
+
+                loop {
+                    let mut tokens = tokens.child(start..end);
+                    let output = interpret(&mut tokens, data)?;
+                    if output == Out::End {
+                        break;
+                    }
+                }
+            }
             RightParen => todo!(),
             LeftBracket => todo!(),
             RihgtBracket => todo!(),
             LeftBrace => todo!(),
             RightBrace => todo!(),
-            Ident(_) => todo!(),
-            Eof => break,
+            Ident(c) => {
+                match tokens.next_indiced().unwrap_or((0, Token::Eof)) {
+                    // Procedure block
+                    (start, LeftBrace) => {
+                        let end = eat_till(tokens, Token::RightBrace, "expected `}`")?;
+
+                        data.procedures.0.insert(
+                            c,
+                            Procedure {
+                                // Add one since `start` is the index of `{`
+                                body_span: (start + 1)..end,
+                            },
+                        );
+                    }
+                    (start, LeftBracket) => {
+                        let end = eat_till(tokens, Token::RightBracket, "expected `]`")?;
+
+                        let var = data
+                            .get_local_or_global(c)
+                            .into_result(Error::VariableDoesNotExists(c))?;
+
+                        for _ in 0..var {
+                            // Add one since `start` is the index of `[`
+                            let mut tokens = tokens.child((start + 1)..end);
+                            let output = interpret(&mut tokens, data)?;
+                            if output == Out::End {
+                                break;
+                            }
+                        }
+                    }
+                    (_, t) => {
+                        return Err(Error::UnexpectedToken {
+                            got: t,
+                            expected: "procedure body",
+                        });
+                    }
+                }
+            }
+            Eof => break Out::Eof,
+        }
+    };
+
+    Ok(out)
+}
+
+/// This function iteratres over tokens untill it meets `stop` token then returns it's index.
+fn eat_till(tokens: &mut TokensIter, stop: Token, msg: &'static str) -> Result<usize, Error> {
+    loop {
+        match tokens.next_indiced() {
+            Some((idx, token)) if token == stop => break Ok(idx),
+            Some((_, _)) => continue,
+            None => {
+                break Err(Error::UnexpectedToken {
+                    got: Token::Eof,
+                    expected: msg,
+                });
+            }
         }
     }
-
-    Ok(())
 }
 
 pub trait OptionIntoEmptyStackExt<T>: Sized {
     fn opt(self) -> Option<T>;
-    fn into_empty_stack(self) -> Result<T, Error> {
+    fn into_empty_stack_err(self) -> Result<T, Error> {
         match self.opt() {
             Some(value) => Ok(value),
             None => Err(Error::StackIsEmpty),
+        }
+    }
+    fn into_result<E>(self, error: E) -> Result<T, E> {
+        match self.opt() {
+            Some(value) => Ok(value),
+            None => Err(error),
         }
     }
 }

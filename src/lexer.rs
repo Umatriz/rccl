@@ -58,6 +58,7 @@ impl Lexer {
 
 pub struct TokensIter<'a> {
     tokens: &'a [Token],
+    /// Index of the **next** token
     cursor: usize,
     valid_range: Range<usize>,
 }
@@ -79,12 +80,28 @@ impl<'a> TokensIter<'a> {
         self.next().map(|t| (self.cursor - 1, t))
     }
 
+    pub fn peek_indiced(&mut self) -> Option<(usize, Token)> {
+        self.peek().map(|t| (self.cursor, t))
+    }
+
     pub fn child(&self, range: Range<usize>) -> TokensIter<'_> {
         TokensIter {
             tokens: self.tokens,
             cursor: range.start,
             valid_range: range,
         }
+    }
+
+    pub fn move_cursor_to(&mut self, place: usize) {
+        self.cursor = place;
+    }
+
+    pub fn cursor_position(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn current_token_index(&self) -> usize {
+        self.cursor_position() - 1
     }
 }
 
@@ -146,7 +163,7 @@ pub enum Token {
     LeftParen,
     RightParen,
     LeftBracket,
-    RihgtBracket,
+    RightBracket,
     LeftBrace,
     RightBrace,
 
@@ -172,7 +189,7 @@ mod tests {
 
         assert_eq!(iter.next(), Some(Token::Hole));
 
-        assert_eq!(iter.peek(), Some(Token::PushZero));
+        assert_eq!(iter.peek_indiced(), Some((1, Token::PushZero)));
         assert_eq!(iter.next(), Some(Token::PushZero));
 
         assert_eq!(iter.next(), Some(Token::Increment));
