@@ -114,7 +114,7 @@ where
 
     let out = loop {
         match tokens.next().unwrap_or(Token::Eof) {
-            Hole => todo!(),
+            // Hole => todo!(),
             PushZero => {
                 data.stack.push(0);
             }
@@ -372,6 +372,12 @@ where
                 }
             }
             Eof => break Out::Eof,
+            t => {
+                return Err(Error::UnexpectedToken {
+                    got: t,
+                    expected: "",
+                });
+            }
         }
     };
 
