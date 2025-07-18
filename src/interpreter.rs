@@ -293,16 +293,19 @@ where
             Continue => break Out::Continue,
             QuestionMark => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
+                    let start = tokens.cursor_position();
                     let end = eat_till(tokens, Token::Semi, "expected `;`")?;
                     let var = data
                         .get_local_or_global(c)
                         .into_result(Error::VariableDoesNotExists(c))?;
                     let top = data.stack.pop().into_empty_stack_err()?;
 
+                    // Cursor is moved to the token next to the `;` by `eat_till` function
+                    // thus we move it back if the comparsion is true.
                     if var == top {
-                        continue;
+                        tokens.move_cursor_to(start);
                     } else {
-                        tokens.move_cursor_to(end + 1);
+                        continue;
                     }
                 }
                 t => {
@@ -325,11 +328,11 @@ where
                     }
                 }
             }
-            RightParen => todo!(),
-            LeftBracket => todo!(),
-            RihgtBracket => todo!(),
-            LeftBrace => todo!(),
-            RightBrace => todo!(),
+            // RightParen => todo!(),
+            // LeftBracket => todo!(),
+            // RihgtBracket => todo!(),
+            // LeftBrace => todo!(),
+            // RightBrace => todo!(),
             Ident(c) => {
                 match tokens.next_indiced().unwrap_or((0, Token::Eof)) {
                     // Procedure block
