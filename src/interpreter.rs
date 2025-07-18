@@ -1,8 +1,9 @@
+use std::fmt::Display;
 use std::io::Write;
 use std::ops::Range;
 use std::{collections::HashMap, io::Read};
 
-use crate::lexer::{Lexer, Token, TokensIter};
+use crate::lexer::{Lexer, Token, TokenContext, TokensIter};
 
 #[derive(Debug, Default)]
 pub struct Stack(Vec<i16>);
@@ -16,7 +17,11 @@ impl Stack {
         self.0.pop()
     }
 
-    pub fn top_mut(&mut self) -> Option<&mut i16> {
+    pub fn peek(&self) -> Option<i16> {
+        self.0.last().copied()
+    }
+
+    pub fn peek_mut(&mut self) -> Option<&mut i16> {
         self.0.last_mut()
     }
 }
@@ -50,6 +55,17 @@ pub struct InterpretationData<I, O> {
 }
 
 impl<I, O> InterpretationData<I, O> {
+    pub fn new(inp: I, out: O) -> Self {
+        Self {
+            stack: Stack::default(),
+            out,
+            inp,
+            globals: Variables::default(),
+            locals: None,
+            procedures: Procedures::default(),
+        }
+    }
+
     /// Attemps to get local variable if it doesn't exists then tries to get a global
     /// one with the same name. Returns `None` in case of a falure.
     pub fn get_local_or_global(&self, name: char) -> Option<i16> {
@@ -76,6 +92,22 @@ impl<I, O> InterpretationData<I, O> {
     }
 }
 
+impl<I, O> Display for InterpretationData<I, O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "-- STACK --")?;
+        for cell in self.stack.0.iter().rev() {
+            writeln!(f, "[ {} ]", cell)?;
+        }
+
+        writeln!(f, "-- PROCEDURES --")?;
+        for (name, _) in self.procedures.0.iter() {
+            writeln!(f, "{} {{...}}", name)?;
+        }
+
+        Ok(())
+    }
+}
+
 /// What was the reason to end interpretation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Output {
@@ -91,8 +123,8 @@ pub enum Output {
 pub enum Error {
     StackIsEmpty,
     UnexpectedToken { got: Token, expected: &'static str },
-    VariableDoesNotExists(char),
-    ProcedureDoesNotExists(char),
+    VariableDoesNotExist(char),
+    ProcedureDoesNotExist(char),
     NegativeNumberFound,
     MustBeProcedure,
     InvalidAsciiCode,
@@ -102,10 +134,16 @@ pub enum Error {
     UnclosedInfiniteBlock,
 }
 
+impl Error {
+    pub fn context(self, context: TokenContext) -> (Self, TokenContext) {
+        (self, context)
+    }
+}
+
 pub fn interpret<I, O>(
     tokens: &mut TokensIter,
     data: &mut InterpretationData<I, O>,
-) -> Result<Output, Error>
+) -> Result<Output, (Error, TokenContext)>
 where
     I: Read,
     O: Write,
@@ -120,29 +158,29 @@ where
                 data.stack.push(0);
             }
             Increment => {
-                let Some(top) = data.stack.top_mut() else {
-                    return Err(Error::StackIsEmpty);
+                let Some(top) = data.stack.peek_mut() else {
+                    return Err(Error::StackIsEmpty.context(tokens.current_context()));
                 };
 
                 *top += 1;
             }
             Decrement => {
-                let Some(top) = data.stack.top_mut() else {
-                    return Err(Error::StackIsEmpty);
+                let Some(top) = data.stack.peek_mut() else {
+                    return Err(Error::StackIsEmpty.context(tokens.current_context()));
                 };
 
                 *top -= 1;
             }
             Add => {
-                let (Some(top), Some(next)) = (data.stack.pop(), data.stack.top_mut()) else {
-                    return Err(Error::StackIsEmpty);
+                let (Some(top), Some(next)) = (data.stack.pop(), data.stack.peek_mut()) else {
+                    return Err(Error::StackIsEmpty.context(tokens.current_context()));
                 };
 
                 *next += top;
             }
             Subtract => {
-                let (Some(top), Some(next)) = (data.stack.pop(), data.stack.top_mut()) else {
-                    return Err(Error::StackIsEmpty);
+                let (Some(top), Some(next)) = (data.stack.pop(), data.stack.peek_mut()) else {
+                    return Err(Error::StackIsEmpty.context(tokens.current_context()));
                 };
 
                 *next -= top;
@@ -151,34 +189,46 @@ where
                 Hole => data.stack.0.reverse(),
                 Ident(c) => {
                     let Some(var) = data.get_local_or_global(c) else {
-                        return Err(Error::VariableDoesNotExists(c));
+                        return Err(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context())
+                        );
                     };
 
                     let len = data.stack.0.len();
-                    let start =
-                        len - usize::try_from(var).map_err(|_| Error::NegativeNumberFound)?;
+                    let start = len
+                        - usize::try_from(var).map_err(|_| {
+                            // Context of the operation
+                            Error::NegativeNumberFound.context(tokens.context_offset(-1))
+                        })?;
                     data.stack.0[start..len].reverse();
                 }
                 t => {
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "`_` or a variable",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Assign => match tokens.next().unwrap_or(Token::Eof) {
                 Hole => {
-                    data.stack.pop().into_empty_stack_err()?;
+                    data.stack
+                        .pop()
+                        .into_result(Error::StackIsEmpty.context(tokens.context_offset(-1)))?;
                 }
                 Ident(c) => {
-                    let val = data.stack.pop().into_empty_stack_err()?;
+                    let val = data
+                        .stack
+                        .pop()
+                        .into_result(Error::StackIsEmpty.context(tokens.current_context()))?;
                     data.globals.0.insert(c, val);
                 }
                 t => {
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "`_` or a variable",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Delete => match tokens.next().unwrap_or(Token::Eof) {
@@ -190,20 +240,25 @@ where
                     }
 
                     if data.globals.0.remove(&c).is_none() {
-                        return Err(Error::VariableDoesNotExists(c));
+                        return Err(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context())
+                        );
                     }
                 }
                 t => {
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Push => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(val) = data.get_local_or_global(c) else {
-                        return Err(Error::VariableDoesNotExists(c));
+                        return Err(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context())
+                        );
                     };
                     data.stack.push(val);
                 }
@@ -211,13 +266,14 @@ where
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             AssignLocal => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(locals) = data.locals.as_mut() else {
-                        return Err(Error::MustBeProcedure);
+                        return Err(Error::MustBeProcedure.context(tokens.context_offset(-1)));
                     };
 
                     locals.0.insert(c, 0);
@@ -226,23 +282,30 @@ where
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Output => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
                     let Some(var) = data.get_local_or_global(c) else {
-                        return Err(Error::VariableDoesNotExists(c));
+                        return Err(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context())
+                        );
                     };
 
-                    let ascii = u8::try_from(var).map_err(|_| Error::InvalidAsciiCode)? as char;
-                    write!(&mut data.out, "{ascii}").map_err(|_| Error::FailedToWrite)?;
+                    let ascii = u8::try_from(var)
+                        .map_err(|_| Error::InvalidAsciiCode.context(tokens.current_context()))?
+                        as char;
+                    write!(&mut data.out, "{ascii}")
+                        .map_err(|_| Error::FailedToWrite.context(tokens.current_context()))?;
                 }
                 t => {
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Input => match tokens.next().unwrap_or(Token::Eof) {
@@ -250,14 +313,18 @@ where
                     let mut buf = [0; 1];
                     data.inp
                         .read_exact(&mut buf)
-                        .map_err(|_| Error::FailedToRead)?;
+                        .map_err(|_| Error::FailedToRead.context(tokens.context_offset(-1)))?;
                     let input = buf[0] as char;
                     if !input.is_ascii() {
-                        return Err(Error::NonAsciiCharacter(input));
+                        return Err(
+                            Error::NonAsciiCharacter(input).context(tokens.context_offset(-1))
+                        );
                     }
 
                     let Some(var) = data.get_local_or_global_mut(c) else {
-                        return Err(Error::VariableDoesNotExists(c));
+                        return Err(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context())
+                        );
                     };
 
                     *var = input as u8 as i16;
@@ -266,17 +333,15 @@ where
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Call => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
-                    let procedure = data
-                        .procedures
-                        .0
-                        .get(&c)
-                        .cloned()
-                        .into_result(Error::ProcedureDoesNotExists(c))?;
+                    let procedure = data.procedures.0.get(&c).cloned().into_result(
+                        Error::ProcedureDoesNotExist(c).context(tokens.current_context()),
+                    )?;
 
                     let mut tokens = tokens.child(procedure.body_span);
                     data.set_locals(Variables::default());
@@ -287,19 +352,24 @@ where
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "procedure name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             End => break Out::End,
             Continue => break Out::Continue,
             QuestionMark => match tokens.next().unwrap_or(Token::Eof) {
                 Ident(c) => {
-                    let start = tokens.cursor_position();
+                    let start = tokens.cursor_index();
                     let end = eat_till(tokens, Token::Semi, "expected `;`")?;
-                    let var = data
-                        .get_local_or_global(c)
-                        .into_result(Error::VariableDoesNotExists(c))?;
-                    let top = data.stack.pop().into_empty_stack_err()?;
+
+                    let var = data.get_local_or_global(c).into_result(
+                        Error::VariableDoesNotExist(c).context(tokens.current_context()),
+                    )?;
+                    let top = data
+                        .stack
+                        .peek()
+                        .into_result(Error::StackIsEmpty.context(tokens.context(start - 1)))?;
 
                     // Cursor is moved to the token next to the `;` by `eat_till` function
                     // thus we move it back if the comparsion is true.
@@ -313,12 +383,13 @@ where
                     return Err(Error::UnexpectedToken {
                         got: t,
                         expected: "variable name",
-                    });
+                    }
+                    .context(tokens.current_context()));
                 }
             },
             Semi => {}
             LeftParen => {
-                let start = tokens.cursor_position();
+                let start = tokens.cursor_index();
                 let end = eat_till(tokens, Token::RightParen, "expected `)`")?;
 
                 loop {
@@ -351,9 +422,9 @@ where
                     (start, LeftBracket) => {
                         let end = eat_till(tokens, Token::RightBracket, "expected `]`")?;
 
-                        let var = data
-                            .get_local_or_global(c)
-                            .into_result(Error::VariableDoesNotExists(c))?;
+                        let var = data.get_local_or_global(c).into_result(
+                            Error::VariableDoesNotExist(c).context(tokens.current_context()),
+                        )?;
 
                         for _ in 0..var {
                             // Add one since `start` is the index of `[`
@@ -368,7 +439,8 @@ where
                         return Err(Error::UnexpectedToken {
                             got: t,
                             expected: "procedure body",
-                        });
+                        }
+                        .context(tokens.current_context()));
                     }
                 }
             }
@@ -377,7 +449,8 @@ where
                 return Err(Error::UnexpectedToken {
                     got: t,
                     expected: "",
-                });
+                }
+                .context(tokens.current_context()));
             }
         }
     };
@@ -386,7 +459,11 @@ where
 }
 
 /// This function iteratres over tokens untill it meets `stop` token then returns it's index.
-fn eat_till(tokens: &mut TokensIter, stop: Token, msg: &'static str) -> Result<usize, Error> {
+fn eat_till(
+    tokens: &mut TokensIter,
+    stop: Token,
+    msg: &'static str,
+) -> Result<usize, (Error, TokenContext)> {
     loop {
         match tokens.next_indiced() {
             Some((idx, token)) if token == stop => break Ok(idx),
@@ -395,7 +472,8 @@ fn eat_till(tokens: &mut TokensIter, stop: Token, msg: &'static str) -> Result<u
                 break Err(Error::UnexpectedToken {
                     got: Token::Eof,
                     expected: msg,
-                });
+                }
+                .context(tokens.current_context()));
             }
         }
     }

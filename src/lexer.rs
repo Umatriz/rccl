@@ -1,21 +1,49 @@
-use std::ops::{Range, RangeBounds};
+use std::{
+    fmt::Display,
+    io::SeekFrom,
+    ops::{Range, RangeBounds},
+};
 
 pub struct Lexer {
-    tokens: Vec<Token>,
+    tokens: Vec<(Token, TokenContext)>,
 }
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
         let mut t = Vec::new();
-        let mut chars = source.chars().peekable();
+        let mut chars = source.chars().enumerate().peekable();
 
         use Token::*;
-        while let Some(c) = chars.next() {
+
+        let mut contexts = Vec::new();
+        let mut current_line = 0;
+        let mut current_column = 0;
+        while let Some((idx, c)) = chars.next() {
+            current_column += 1;
             match c {
-                '\n' => {}
-                '\r' => {}
-                ' ' => {}
-                '\t' => {}
+                '\n' => {
+                    current_line += 1;
+                    current_column = 0;
+                    continue;
+                }
+                '\r' if chars.peek().is_some_and(|(_, c)| *c == '\n') => {
+                    chars.next();
+                    current_line += 1;
+                    current_column = 0;
+                    continue;
+                }
+                '\r' => {
+                    current_line += 1;
+                    current_column = 0;
+                    continue;
+                }
+                ' ' => {
+                    continue;
+                }
+                '\t' => {
+                    current_column += 3;
+                    continue;
+                }
 
                 '_' => t.push(Hole),
                 '^' => t.push(PushZero),
@@ -43,28 +71,56 @@ impl Lexer {
                 '{' => t.push(LeftBrace),
                 '}' => t.push(RightBrace),
 
-                '/' => while chars.next_if(|c| *c != '\n' || *c != '\r').is_some() {},
+                '/' => {
+                    while chars.next_if(|(_, c)| *c != '\n' && *c != '\r').is_some() {}
+                    // Since comments don't have a token we skip a context
+                    continue;
+                }
 
                 c if c.is_ascii_alphabetic() => {
                     t.push(Ident(c));
                 }
                 t => panic!("Failed to parse token {t}"),
             }
+
+            contexts.push(TokenContext {
+                line: current_line,
+                // Hope this is right
+                column: current_column,
+            });
         }
 
-        Self { tokens: t }
+        Self {
+            tokens: t.into_iter().zip(contexts).collect(),
+        }
+    }
+
+    pub fn iter_tokens(&self) -> TokensIter<'_> {
+        TokensIter::new(&self.tokens)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenContext {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Display for TokenContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line + 1, self.column + 1)
     }
 }
 
 pub struct TokensIter<'a> {
-    tokens: &'a [Token],
+    tokens: &'a [(Token, TokenContext)],
     /// Index of the **next** token
     cursor: usize,
     valid_range: Range<usize>,
 }
 
 impl<'a> TokensIter<'a> {
-    pub fn new(tokens: &'a [Token]) -> Self {
+    pub fn new(tokens: &'a [(Token, TokenContext)]) -> Self {
         Self {
             tokens,
             cursor: 0,
@@ -73,7 +129,7 @@ impl<'a> TokensIter<'a> {
     }
 
     pub fn peek(&self) -> Option<Token> {
-        self.tokens.get(self.cursor).copied()
+        self.tokens.get(self.cursor).map(|(t, _c)| t).copied()
     }
 
     pub fn next_indiced(&mut self) -> Option<(usize, Token)> {
@@ -82,6 +138,24 @@ impl<'a> TokensIter<'a> {
 
     pub fn peek_indiced(&mut self) -> Option<(usize, Token)> {
         self.peek().map(|t| (self.cursor, t))
+    }
+
+    pub fn get_context(&self, idx: usize) -> Option<TokenContext> {
+        self.tokens.get(idx).map(|(_t, c)| c).copied()
+    }
+
+    pub fn context(&self, idx: usize) -> TokenContext {
+        self.tokens[idx].1
+    }
+
+    /// Contexet offeseted by `offset` from the current token.
+    pub fn context_offset(&self, offset: isize) -> TokenContext {
+        let idx = self.current_token_index() as isize + offset;
+        self.tokens[idx as usize].1
+    }
+
+    pub fn current_context(&self) -> TokenContext {
+        self.tokens[self.cursor - 1].1
     }
 
     pub fn child(&self, range: Range<usize>) -> TokensIter<'_> {
@@ -96,12 +170,12 @@ impl<'a> TokensIter<'a> {
         self.cursor = place;
     }
 
-    pub fn cursor_position(&self) -> usize {
+    pub fn cursor_index(&self) -> usize {
         self.cursor
     }
 
     pub fn current_token_index(&self) -> usize {
-        self.cursor_position() - 1
+        self.cursor_index() - 1
     }
 }
 
@@ -114,7 +188,7 @@ impl Iterator for TokensIter<'_> {
         self.cursor = (self.cursor + 1).min(self.valid_range.end);
 
         if self.valid_range.contains(&idx) {
-            self.tokens.get(idx).copied()
+            self.tokens.get(idx).map(|(t, _c)| t).copied()
         } else {
             None
         }
