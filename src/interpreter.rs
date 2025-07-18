@@ -87,6 +87,7 @@ pub enum Output {
     Eof,
 }
 
+#[derive(Debug)]
 pub enum Error {
     StackIsEmpty,
     UnexpectedToken { got: Token, expected: &'static str },

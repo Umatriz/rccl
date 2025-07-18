@@ -39,11 +39,11 @@ impl Lexer {
                 '(' => t.push(LeftParen),
                 ')' => t.push(RightParen),
                 '[' => t.push(LeftBracket),
-                ']' => t.push(RihgtBracket),
+                ']' => t.push(RightBracket),
                 '{' => t.push(LeftBrace),
                 '}' => t.push(RightBrace),
 
-                '/' => while let Some(_) = chars.next_if(|c| *c != '\n' || *c != '\r') {},
+                '/' => while chars.next_if(|c| *c != '\n' || *c != '\r').is_some() {},
 
                 c if c.is_ascii_alphabetic() => {
                     t.push(Ident(c));
