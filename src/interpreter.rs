@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::io::Write;
+use std::io::{Write, WriterPanicked};
 use std::ops::Range;
 use std::{collections::HashMap, io::Read};
 
@@ -102,6 +102,11 @@ impl<I, O> Display for InterpretationData<I, O> {
         writeln!(f, "-- PROCEDURES --")?;
         for (name, _) in self.procedures.0.iter() {
             writeln!(f, "{} {{...}}", name)?;
+        }
+
+        writeln!(f, "-- GLOBALS --")?;
+        for (k, v) in self.globals.0.iter() {
+            writeln!(f, "GLOBAL {} = {}", k, v)?;
         }
 
         Ok(())
@@ -221,6 +226,14 @@ where
                         .stack
                         .pop()
                         .into_result(Error::StackIsEmpty.context(tokens.current_context()))?;
+
+                    if let Some(local_var) =
+                        data.locals.as_mut().and_then(|locals| locals.0.get_mut(&c))
+                    {
+                        *local_var = val;
+                        continue;
+                    }
+
                     data.globals.0.insert(c, val);
                 }
                 t => {
